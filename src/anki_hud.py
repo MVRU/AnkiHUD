@@ -5,7 +5,6 @@ from aqt import mw, gui_hooks
 from aqt.deckbrowser import DeckBrowser
 from aqt.qt import *
 
-# Definición robusta del nombre del addon
 ADDON_DIR = os.path.dirname(os.path.dirname(__file__))
 ADDON_NAME = os.path.basename(ADDON_DIR)
 
@@ -16,7 +15,7 @@ ADDON_NAME = os.path.basename(ADDON_DIR)
 class AnkiHUDSettings(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configuración - AnkiHUD 🥽")
+        self.setWindowTitle("Configuración - AnkiHUD")
         self.setMinimumWidth(350)
         
         layout = QVBoxLayout()
@@ -195,7 +194,6 @@ def inject_custom_styles(web_content, context):
 
     css += "</style>"
 
-    # --- JAVASCRIPT ---
     js = """
     <script>
     function updateIcons() {
@@ -245,36 +243,31 @@ def on_options_menu(menu, deck_id):
 
 gui_hooks.deck_browser_will_show_options_menu.append(on_options_menu)
 
-original_render_deck_node = DeckBrowser._render_deck_node
+# ==========================================
+# 3. LOGICA COMPARTIDA
+# ==========================================
 
-def my_render_deck_node(self, node, ctx):
-    html_original = original_render_deck_node(self, node, ctx)
-    deck_id = node.deck_id
-    if not deck_id: return html_original
-
-    
-    # --- BARRA DE PROGRESO ---
-    config = mw.addonManager.getConfig(ADDON_NAME) or {}
-    deck = mw.col.decks.get(deck_id)
-    
-    # Si la barra está deshabilitada (global o individual), devolvemos original
-    if not config.get("global_progress_enabled", True) or not deck.get("ankihud_enabled", False):
-        return html_original
-
+def get_deck_progress(deck_id):
+    """Calcule el progreso (porcentaje y color) para un mazo dado."""
     target_ids = mw.col.decks.deck_and_child_ids(deck_id)
     ids_str = ",".join(str(i) for i in target_ids)
     total = mw.col.db.scalar(f"select count() from cards where did in ({ids_str})")
     
-    if total == 0: return html_original
+    if total == 0:
+        return 0, "#00b894" # Default green or ignore
 
     mature = mw.col.db.scalar(f"select count() from cards where did in ({ids_str}) and ivl >= 21")
     percentage = (mature / total) * 100
     
     if percentage < 30: color = "#ff7675"      
     elif percentage < 70: color = "#fdcb6e"    
-    else: color = "#00b894"                    
+    else: color = "#00b894"  
+    
+    return percentage, color
 
-    bar_html = f"""
+def get_bar_html_for_browser(percentage, color):
+    """Genera el HTML de la barra para el explorador de mazos (lista)."""
+    return f"""
     <div style="
         position: absolute;
         right: 0;
@@ -296,7 +289,92 @@ def my_render_deck_node(self, node, ctx):
     </div>
     """
 
+def get_bar_html_for_overview(percentage, color):
+    """Genera el HTML de la barra para la pantalla de resumen del mazo."""
+    return f"""
+    <div style="
+        display: flex; 
+        align-items: center; 
+        justify-content: center;
+        margin-top: 15px; 
+        margin-bottom: 10px;
+        width: 100%;
+    ">
+        <div style="
+            width: 300px; 
+            height: 8px; 
+            background: rgba(150, 150, 150, 0.2); 
+            border-radius: 4px; 
+            overflow: hidden; 
+            margin-right: 15px;
+            display: flex;                
+            justify-content: flex-start;  
+        ">
+            <div style="width: {percentage}%; height: 100%; background-color: {color}; transition: width 0.3s ease-out;"></div>
+        </div>
+        <span style="font-size: 1rem; color: var(--text-fg); font-weight: 600;">
+            {percentage:.0f}% Completado
+        </span>
+    </div>
+    """
+
+# ==========================================
+# 4. RENDERIZADO DE BARRAS (BROWSER)
+# ==========================================
+
+# 1. GUARDAMOS LA REFERENCIA ORIGINAL
+original_render_deck_node = DeckBrowser._render_deck_node
+
+def my_render_deck_node(self, node, ctx):
+    # Ahora llamamos a la variable que definimos arriba
+    html_original = original_render_deck_node(self, node, ctx)
+    
+    deck_id = node.deck_id
+    if not deck_id: return html_original
+
+    # --- BARRA DE PROGRESO ---
+    config = mw.addonManager.getConfig(ADDON_NAME) or {}
+    deck = mw.col.decks.get(deck_id)
+    
+    # Si la barra está deshabilitada (global o individual), devolvemos original
+    if not config.get("global_progress_enabled", True) or not deck.get("ankihud_enabled", False):
+        return html_original
+
+    percentage, color = get_deck_progress(deck_id)
+    bar_html = get_bar_html_for_browser(percentage, color)
+
+    # Inyectamos la barra justo antes de cerrar la celda del nombre (</td>)
+    # Usamos count=1 para que solo afecte a la primera celda (la del nombre)
     final_html = re.sub(r'(</td>)', bar_html + r'\1', html_original, count=1)
     return final_html
 
 DeckBrowser._render_deck_node = my_render_deck_node
+
+
+# ==========================================
+# 5. RENDERIZADO DE BARRAS (OVERVIEW)
+# ==========================================
+
+from aqt.overview import Overview
+
+def on_overview_will_render_content(overview, content):
+    config = mw.addonManager.getConfig(ADDON_NAME) or {}
+    
+    # Mantenemos el interruptor GLOBAL de la configuración general del addon
+    if not config.get("global_progress_enabled", True):
+        return
+        
+    # Obtenemos el ID del mazo actual de forma segura
+    deck_id = mw.col.decks.get_current_id()
+    
+    if not deck_id:
+        return
+    
+    percentage, color = get_deck_progress(deck_id)
+    bar_html = get_bar_html_for_overview(percentage, color)
+    
+    # Inyectamos el HTML en la sección de la tabla
+    if hasattr(content, "table"):
+         content.table += bar_html
+
+gui_hooks.overview_will_render_content.append(on_overview_will_render_content)
