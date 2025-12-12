@@ -87,4 +87,4 @@ Contributions are welcome! If you have ideas on how to make Anki more visual and
 
 ## 📄 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the **MIT License**. See `LICENSE` for more information.
